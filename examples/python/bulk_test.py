@@ -1,10 +1,12 @@
 import argparse
 import json
 import os
+import time
 from base64 import b64decode
 import pandas as pd
 
 from acrawriter import create_acrastruct
+from acrawriter.sqlalchemy import AcraBinary
 from sqlalchemy import (Table, Column, Integer, MetaData, create_engine, Binary, Text)
 from urllib.request import urlopen
 
@@ -39,12 +41,26 @@ def write_data(data, connection):
         raw_data=data)
 
 
-def setup_df(table, n=1000000):
-    zone_id, key = get_zone()
-    print("data: {}\nzone: {}".format(data, zone_id))
-    return pd.concat([pd.DataFrame([i, zone_id
-                , create_acrastruct(('raw_'+i).encode('utf-8'), key, zone_id.encode('utf-8')), 'raw_'+i]
-                , columns=table.__table__.columns) for i in range(n)], ignore_index = True)
+def setup_df(table, zone_id, key, n=1000000, encrypt=False):
+    zone_id_utf8 = zone_id.encode('utf-8')
+    data = dict()
+    for i in range(n):
+        raw = str(i) + ': een beetje lange string om wat vulling te creëren, raw_' + str(i)
+        if encrypt:
+            enc = create_acrastruct(raw.encode('utf-8'), key, zone_id_utf8)
+        else:
+            enc = raw
+        data[i] = (i, zone_id, enc, raw)
+    return pd.DataFrame.from_dict(data, columns=[ c.name for c in table.columns ], orient='index')
+
+
+def setup_df_no_zone_id(table, n=1000000):
+    data = dict()
+    for i in range(n):
+        raw = str(i) + ': een beetje lange string om wat vulling te creëren, raw_' + str(i)
+        enc = raw.encode('utf-8')
+        data[i] = (i, enc, raw)
+    return pd.DataFrame.from_dict(data, columns=[ c.name for c in table.columns ], orient='index')
 
 
 if __name__ == '__main__':
@@ -72,12 +88,21 @@ if __name__ == '__main__':
     # default driver
     driver = 'postgresql'
 
+    zone_id, key = get_zone()
+    print("zone: {}".format(zone_id))
+
     metadata = MetaData()
     test_table = Table(
         'test_bulk_insert', metadata,
         Column('id', Integer, primary_key=True, nullable=False),
         Column('zone_id', Binary, nullable=True),
         Column('data', Binary, nullable=False),
+        Column('raw_data', Text, nullable=False),
+    )
+    test_table_no_zone_id = Table(
+        'test_bulk_insert_no_zone_id', metadata,
+        Column('id', Integer, primary_key=True, nullable=False),
+        Column('data', AcraBinary(key), nullable=False),
         Column('raw_data', Text, nullable=False),
     )
     engine = create_engine(
@@ -90,6 +115,30 @@ if __name__ == '__main__':
 
     print('DB driver: {}'.format(driver))
 
-    df = setup_df(test_table)
+    # zone_id test
+    t0 = time.time()
+    df_raw = setup_df(test_table, zone_id, key, 100000, False)
+    t1 = time.time()
+    df_enc = setup_df(test_table, zone_id, key, 100000, True)
+    t2 = time.time()
+    print(f"time for raw execution (with zone_id): {t1-t0}")
+    print(f"time for enc execution (with zone_id): {t2-t1}")
 
-    df.to_sql(test_table.name, connection)
+    t0 = time.time()
+    df_raw.to_sql(test_table.name, connection, if_exists='replace', method='multi')
+    t1 = time.time()
+    df_enc.to_sql(test_table.name, connection, if_exists='replace', method='multi')
+    t2 = time.time()
+    print(f"time for raw insert (with zone_id): {t1-t0}")
+    print(f"time for enc insert (with zone_id): {t2-t1}")
+
+    # no zone_id test
+    t0 = time.time()
+    df_raw = setup_df_no_zone_id(test_table_no_zone_id, 100000)
+    t1 = time.time()
+    print(f"time for raw execution (without zone_id): {t1-t0}")
+
+    t0 = time.time()
+    df_raw.to_sql(test_table_no_zone_id.name, connection, if_exists='replace', method='multi')
+    t1 = time.time()
+    print(f"time for raw insert (without zone_id): {t1-t0}")
